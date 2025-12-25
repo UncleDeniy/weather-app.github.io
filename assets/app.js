@@ -1032,6 +1032,7 @@ async function refresh() {
     const [wx, aqi] = await Promise.all([
       fetchWeather(state.place),
       fetchAir(state.place).catch(() => null),
+      setOfflineUI(false);
     ]);
     state.wx = wx;
     state.aqi = aqi;
@@ -1344,7 +1345,10 @@ function bindEvents() {
 
   // online/offline events
   window.addEventListener('online', () => { setOfflineUI(false); refresh(); });
-  window.addEventListener('offline', () => setOfflineUI(true));
+  window.addEventListener('offline', () => { 
+  if (!navigator.onLine) setOfflineUI(true);
+  });
+
 
   // lazy map init when scrolled into view
   const obs = new IntersectionObserver((entries) => {
