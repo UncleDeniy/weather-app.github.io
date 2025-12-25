@@ -1,18 +1,21 @@
 /* WeatherVision service worker */
-const CACHE_VERSION = 'wv-v3';
+const CACHE_VERSION = 'wv-v4';
 const APP_SHELL = [
   './',
   './index.html',
+  './widget.html',
   './assets/styles.css',
+  './assets/widget.css',
   './assets/app.js',
   './assets/ui.js',
+  './assets/widget.js',
   './manifest.webmanifest',
   './assets/icons/icon-192.png',
   './assets/icons/icon-512.png',
   './assets/icons/icon-maskable-512.png',
   './assets/icons/apple-touch-icon.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
+  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
 ];
 
 self.addEventListener('install', (event) => {
@@ -31,53 +34,64 @@ self.addEventListener('activate', (event) => {
   })());
 });
 
-function isApi(url){
+function isApi(url) {
   return url.origin === 'https://api.open-meteo.com' ||
          url.origin === 'https://air-quality-api.open-meteo.com' ||
          url.origin === 'https://geocoding-api.open-meteo.com';
 }
 
-async function networkFirst(request){
+function isCacheableResponse(res) {
+  // Avoid caching partial/range responses (status 206) — Cache.put doesn't support them
+  if (!res) return false;
+  if (res.status === 206) return false;
+  if (!res.ok) return false;
+  if (res.headers && res.headers.get('content-range')) return false;
+  return true;
+}
+
+async function networkFirst(request) {
   const cache = await caches.open(CACHE_VERSION);
-  try{
+  try {
     const fresh = await fetch(request);
-    // Cache successful GET responses
-    if(request.method === 'GET' && fresh && fresh.ok){
-      cache.put(request, fresh.clone());
+    if (request.method === 'GET' && !request.headers.has('range') && isCacheableResponse(fresh)) {
+      await cache.put(request, fresh.clone());
     }
     return fresh;
-  }catch(err){
-    const cached = await cache.match(request, { ignoreSearch:false });
-    if(cached) return cached;
+  } catch (err) {
+    const cached = await cache.match(request, { ignoreSearch: false });
+    if (cached) return cached;
     throw err;
   }
 }
 
-async function cacheFirst(request){
+async function cacheFirst(request) {
   const cache = await caches.open(CACHE_VERSION);
-  const cached = await cache.match(request, { ignoreSearch:false });
-  if(cached) return cached;
+  const cached = await cache.match(request, { ignoreSearch: false });
+  if (cached) return cached;
   const fresh = await fetch(request);
-  if(request.method === 'GET' && fresh && fresh.ok){
-    cache.put(request, fresh.clone());
+  if (request.method === 'GET' && !request.headers.has('range') && isCacheableResponse(fresh)) {
+    await cache.put(request, fresh.clone());
   }
   return fresh;
 }
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  if(req.method !== 'GET') return;
+  if (req.method !== 'GET') return;
+
   const url = new URL(req.url);
 
-  // Navigation: try network, fallback to cached shell
-  if(req.mode === 'navigate'){
+  // Navigation: network-first, fallback to cached shell
+  if (req.mode === 'navigate') {
     event.respondWith((async () => {
-      try{
+      try {
         const fresh = await fetch(req);
         const cache = await caches.open(CACHE_VERSION);
-        cache.put('./index.html', fresh.clone());
+        if (isCacheableResponse(fresh)) {
+          await cache.put('./index.html', fresh.clone());
+        }
         return fresh;
-      }catch{
+      } catch {
         const cache = await caches.open(CACHE_VERSION);
         return (await cache.match('./index.html')) || (await cache.match('./'));
       }
@@ -86,7 +100,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // API: network-first (fresh data), fallback to cache
-  if(isApi(url)){
+  if (isApi(url)) {
     event.respondWith(networkFirst(req));
     return;
   }

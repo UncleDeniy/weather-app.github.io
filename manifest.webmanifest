@@ -24,5 +24,20 @@
       "type": "image/png",
       "purpose": "maskable"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Виджет",
+      "short_name": "Виджет",
+      "description": "Компактный экран с текущей погодой и ближайшими часами",
+      "url": "./widget.html",
+      "icons": [
+        {
+          "src": "assets/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
   ]
 }

@@ -24,6 +24,10 @@
 </head>
 
 <body>
+  <div class="bg-layer" id="bgA" aria-hidden="true"></div>
+  <div class="bg-layer bg-layer--alt" id="bgB" aria-hidden="true"></div>
+<div aria-hidden="true" class="fx-layer" id="fxA"></div>
+<div aria-hidden="true" class="fx-layer fx-layer--alt" id="fxB"></div>
   <a class="skip" href="#main">Перейти к контенту</a>
 
   <div class="app" id="app">
@@ -57,10 +61,74 @@
         <button class="btn btn--ghost" type="button" id="themeBtn" aria-label="Переключить тему" title="Тема">
           <span aria-hidden="true">◐</span>
         </button>
+        <button class="btn btn--ghost" type="button" id="settingsBtn" aria-label="Настройки" title="Настройки">
+          <span aria-hidden="true">⚙</span>
+        </button>
       </div>
     </header>
 
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab is-active" type="button" data-view="forecast" aria-pressed="true">Прогноз</button>
+      <button class="tab" type="button" data-view="cities" aria-pressed="false">Города</button>
+      <button class="tab" type="button" data-view="settings" aria-pressed="false">Настройки</button>
+    </nav>
+
     <main id="main" class="layout" aria-live="polite">
+      <section class="panel view" id="viewCities" hidden aria-label="Города">
+        <div class="panel__head">
+          <h2 class="h2">Города</h2>
+          <div class="muted">Быстрый обзор избранных</div>
+        </div>
+        <div class="dash" id="dashboard"></div>
+        <div class="muted" id="dashHint">Добавь города в избранное — они появятся здесь.</div>
+      </section>
+
+      <section class="panel view" id="viewSettings" hidden aria-label="Настройки">
+        <div class="panel__head">
+          <h2 class="h2">Настройки</h2>
+          <div class="muted">Параметры и доступность</div>
+        </div>
+        <div class="settings">
+          <div class="setting">
+            <div>
+              <div class="setting__k">Звук окружения</div>
+              <div class="muted">Дождь/ветер/гроза — очень тихо (по умолчанию выкл.)</div>
+            </div>
+            <button class="toggle" id="soundToggle" type="button" aria-pressed="false">Выкл</button>
+          </div>
+          <div class="setting">
+            <div>
+              <div class="setting__k">Доступность</div>
+              <div class="muted">Крупнее текст, выше контраст, меньше анимаций</div>
+            </div>
+            <button class="toggle" id="a11yToggle" type="button" aria-pressed="false">Выкл</button>
+          </div>
+          <div class="setting">
+            <div>
+              <div class="setting__k">Авто‑обновление</div>
+              <div class="muted">Обновлять при возвращении в приложение или раз в 30 минут</div>
+            </div>
+            <button class="toggle" id="refreshToggle" type="button" aria-pressed="true">Вкл</button>
+          </div>
+          <div class="setting">
+            <div>
+              <div class="setting__k">Мини‑виджет</div>
+              <div class="muted">Превью “как будто виджет” внутри приложения</div>
+            </div>
+            <div class="widget" id="widgetPreview" aria-label="Мини-виджет"></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="offline" id="offlineScreen" hidden>
+        <div class="offline__card">
+          <div class="offline__title">Вы офлайн</div>
+          <div class="muted" id="offlineText">Показываю последний сохранённый прогноз.</div>
+          <button class="btn btn--primary" type="button" id="offlineTry">Попробовать обновить</button>
+        </div>
+      </div>
+
+      <section class="panel view" id="viewForecast" aria-label="Прогноз">
       <section class="panel" aria-label="Текущая погода">
         <div class="panel__head">
           <div>
@@ -77,6 +145,10 @@
           <div class="now__temp">
             <div class="temp" id="temp">—</div>
             <div class="temp__sub" id="summary">—</div>
+            <div class="now__row">
+              <div class="pill" id="confidence" title="Оценка надёжности прогноза">Надёжность: —</div>
+              <button class="pill pill--btn" type="button" id="explainBtn">Почему так?</button>
+            </div>
           </div>
           <div class="now__chipset">
             <div class="chip"><span class="chip__k">Ощущается</span><span class="chip__v" id="feels">—</span></div>
@@ -123,12 +195,23 @@
           <div class="notice__dot" aria-hidden="true"></div>
           <div class="notice__text" id="noticeText"></div>
         </div>
+
+        <div class="timeline" id="timeline" aria-label="Таймлайн сегодня"></div>
+
+        <div class="alerts" id="alerts" aria-label="Предупреждения" hidden>
+          <div class="alerts__head">Предупреждения</div>
+          <div class="alerts__list" id="alertsList"></div>
+        </div>
       </section>
 
-      <section class="panel" aria-label="Почасовой прогноз">
-        <div class="panel__head">
-          <h2 class="h2">Почасовой</h2>
-          <div class="muted" id="hourlyMeta">—</div>
+      <section class="panel panel--sticky" aria-label="Почасовой прогноз">
+        <div class="panel__head panel__head--hourly">
+          <div>
+            <h2 class="h2">Почасовой</h2>
+            <div class="muted" id="hourlyMeta">—</div>
+          </div>
+          <canvas class="hour-chart" id="hourChart" width="420" height="72" aria-hidden="true"></canvas>
+      <div class="chart-tooltip" id="hourTooltip" role="status" aria-live="polite" hidden></div>
         </div>
         <div class="scroller" id="hourly" role="list" aria-label="Почасовой прогноз"></div>
       </section>
@@ -137,6 +220,7 @@
         <div class="panel__head">
           <h2 class="h2">7 дней</h2>
           <div class="muted" id="dailyMeta">—</div>
+          <button class="btn btn--ghost" type="button" id="compareBtn" title="Сравнить дни" aria-label="Сравнить дни">⇄</button>
         </div>
         <div class="daily" id="daily" role="list" aria-label="Прогноз на 7 дней"></div>
       </section>
@@ -157,6 +241,7 @@
         <div class="favorites" id="favorites"></div>
         <div class="muted" id="favHint">Добавляй города звёздочкой — они появятся здесь.</div>
       </aside>
+      </section>
     </main>
 
     <footer class="footer">
@@ -166,6 +251,17 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+
+  <div class="modal" id="modal" hidden aria-hidden="true">
+    <div class="modal__back" data-close="1" aria-hidden="true"></div>
+    <div class="modal__card" role="dialog" aria-modal="true" aria-label="Диалог">
+      <div class="modal__head">
+        <div class="modal__title" id="modalTitle">—</div>
+        <button class="btn btn--ghost" type="button" data-close="1" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="modal__body" id="modalBody"></div>
+    </div>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script type="module" src="./assets/app.js"></script>

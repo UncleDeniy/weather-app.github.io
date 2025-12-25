@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>WeatherVision Widget</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <meta name="theme-color" content="#0b1020" />
+  <link rel="icon" href="./assets/icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./assets/icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="./assets/styles.css" />
+  <link rel="stylesheet" href="./assets/widget.css" />
+</head>
+<body class="wv widget">
+  <div id="bgLayer" class="widget-bg" aria-hidden="true"></div>
+  <div class="widget-shell">
+    <header class="widget-head">
+      <div class="widget-title">
+        <div class="widget-city" id="wCity">—</div>
+        <div class="widget-sub" id="wSub">Обновление…</div>
+      </div>
+      <div class="widget-actions">
+        <button class="btn btn--ghost" id="wOpenApp" type="button" title="Открыть полное приложение">Открыть</button>
+        <button class="btn" id="wRefresh" type="button" title="Обновить">↻</button>
+      </div>
+    </header>
+
+    <main class="widget-main">
+      <section class="widget-now glass">
+        <div class="now-left">
+          <div class="now-temp"><span id="wTemp">—</span><span class="unit" id="wUnit">°C</span></div>
+          <div class="now-desc" id="wDesc">—</div>
+          <div class="now-meta">
+            <span id="wFeels">Ощущается —</span>
+            <span id="wWind">Ветер —</span>
+          </div>
+        </div>
+        <div class="now-right">
+          <div class="icon-wrap" id="wIcon" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <section class="widget-chart glass" aria-label="Почасовой прогноз">
+        <div class="chart-head">
+          <div class="chart-title">Ближайшие 12 часов</div>
+          <div class="chart-hint">тап по точке → час</div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="wSvg" viewBox="0 0 320 120" role="img" aria-label="График температуры и осадков"></svg>
+          <div id="wTip" class="chart-tip" hidden></div>
+        </div>
+      </section>
+
+      <section class="widget-hours" id="wHours" aria-label="Карточки часов"></section>
+
+      <section class="widget-footer">
+        <div class="tiny" id="wOffline" hidden>Оффлайн: показаны сохранённые данные</div>
+        <div class="tiny">Добавь на экран: меню браузера → «Установить приложение»</div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="./assets/widget.js"></script>
+</body>
+</html>

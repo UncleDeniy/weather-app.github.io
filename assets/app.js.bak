@@ -1,0 +1,1341 @@
+import { fmtTemp, fmtWind, fmtKm, fmtPressure, wmoToText, clamp, debounce, toast, fmtClock, weatherTheme, wmoToIcon, themeGradient } from './ui.js';
+
+const state = {
+    unit: 'metric', // metric (°C, m/s) | imperial (°F, mph)
+    theme: 'auto',
+    sound: false,
+    a11y: false,
+    autoRefresh: true,
+    place: null, // {name, country, lat, lon, tz}
+    favorites: [],
+    map: null,
+    marker: null,
+    suggestions: [],
+    sugIndex: -1,
+    selectedDay: null,
+    chart: { hours: [], hover: -1, selected: -1 },
+};
+
+// Smooth background cross-fade using two fixed layers
+let bgFlip = false;
+let fxFlip = false;
+
+function setSmoothBackground(theme) {
+    const [g0, g1, g2] = themeGradient(theme);
+    const a = els.bgA,
+        b = els.bgB;
+    if (!a || !b) return;
+    const next = bgFlip ? a : b;
+    const prev = bgFlip ? b : a;
+
+    next.style.setProperty('--g0', g0);
+    next.style.setProperty('--g1', g1);
+    next.style.setProperty('--g2', g2);
+
+    next.style.opacity = '1';
+    prev.style.opacity = '0';
+    bgFlip = !bgFlip;
+}
+
+// (deduped)
+function fxClassFor(wmo, isDay) {
+    if ([95, 96, 99].includes(wmo)) return 'fx-storm';
+    if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(wmo)) return 'fx-rain';
+    if ([71, 73, 75, 77, 85, 86].includes(wmo)) return 'fx-snow';
+    if ([45, 48].includes(wmo)) return 'fx-fog';
+    if ([1, 2, 3].includes(wmo)) return 'fx-clouds';
+    return isDay ? '' : 'fx-clouds';
+}
+
+function setSmoothFX(wmo, isDay) {
+    const cls = fxClassFor(wmo, isDay);
+    const next = fxFlip ? els.fxB : els.fxA;
+    const prev = fxFlip ? els.fxA : els.fxB;
+    if (!next || !prev) return;
+
+    // reset
+    next.className = 'fx-layer' + (fxFlip ? ' fx-layer--alt' : '');
+    prev.className = 'fx-layer' + (!fxFlip ? ' fx-layer--alt' : '');
+
+    if (cls) {
+        next.classList.add(cls);
+        next.style.opacity = '1';
+    } else {
+        next.style.opacity = '0';
+    }
+    prev.style.opacity = '0';
+    fxFlip = !fxFlip;
+}
+
+/* ---------------------------
+   DOM refs
+---------------------------- */
+const els = {
+    app: document.querySelector('.app') || document.body,
+    bgA: document.querySelector('.bg-layer--a'),
+    bgB: document.querySelector('.bg-layer--b'),
+    fxA: document.querySelector('.fx-layer--a'),
+    fxB: document.querySelector('.fx-layer--b'),
+
+    // header
+    place: document.getElementById('place'),
+    placeMeta: document.getElementById('placeMeta'),
+    unitBtn: document.getElementById('unitBtn'),
+    themeBtn: document.getElementById('themeBtn'),
+    soundBtn: document.getElementById('soundBtn'),
+    a11yBtn: document.getElementById('a11yBtn'),
+    refreshBtn: document.getElementById('refreshBtn'),
+
+    // search
+    search: document.getElementById('search'),
+    searchClear: document.getElementById('searchClear'),
+    suggestions: document.getElementById('suggestions'),
+
+    // notice
+    notice: document.getElementById('notice'),
+    noticeText: document.getElementById('noticeText'),
+    noticeClose: document.getElementById('noticeClose'),
+
+    // current
+    temp: document.getElementById('temp'),
+    summary: document.getElementById('summary'),
+    feels: document.getElementById('feels'),
+    wind: document.getElementById('wind'),
+    humidity: document.getElementById('humidity'),
+    pressure: document.getElementById('pressure'),
+    uv: document.getElementById('uv'),
+    visibility: document.getElementById('visibility'),
+    precipChance: document.getElementById('precipChance'),
+    dewPoint: document.getElementById('dewPoint'),
+    sunrise: document.getElementById('sunrise'),
+    sunset: document.getElementById('sunset'),
+    confidence: document.getElementById('confidence'),
+
+    // views
+    tabs: document.querySelectorAll('[data-view]'),
+    viewForecast: document.getElementById('viewForecast'),
+    viewFavorites: document.getElementById('viewFavorites'),
+    viewMap: document.getElementById('viewMap'),
+
+    // lists/cards
+    daily: document.getElementById('daily'),
+    hourly: document.getElementById('hourly'),
+    chart: document.getElementById('chart'),
+    chartTooltip: document.getElementById('chartTooltip'),
+    timeline: document.getElementById('timeline'),
+    alerts: document.getElementById('alerts'),
+    alertsList: document.getElementById('alertsList'),
+
+    // favorites
+    favoriteBtn: document.getElementById('favoriteBtn'),
+    favorites: document.getElementById('favorites'),
+    favHint: document.getElementById('favHint'),
+    dashboard: document.getElementById('dashboard'),
+
+    // modal
+    modal: document.getElementById('modal'),
+    modalTitle: document.getElementById('modalTitle'),
+    modalBody: document.getElementById('modalBody'),
+    modalClose: document.getElementById('modalClose'),
+
+    // loading
+    loading: document.getElementById('loading'),
+
+    // widget preview
+    widgetPreview: document.getElementById('widgetPreview'),
+};
+
+/* ---------------------------
+   Utils
+---------------------------- */
+function $(sel, root = document) { return root.querySelector(sel); }
+
+function $$(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+
+function escapeHtml(s) {
+    return String(s ? ? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", "&#039;");
+}
+
+function setLoading(on) {
+    if (!els.loading) return;
+    els.loading.hidden = !on;
+}
+
+function showNotice(text) {
+    if (!els.notice || !els.noticeText) return;
+    els.noticeText.textContent = text;
+    els.notice.hidden = false;
+}
+
+function hideNotice() {
+    if (!els.notice) return;
+    els.notice.hidden = true;
+}
+
+/* ---------------------------
+   Storage
+---------------------------- */
+const LS_KEY = 'wx.v1';
+
+function loadState() {
+    try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return;
+        const s = JSON.parse(raw);
+        if (s && typeof s === 'object') {
+            state.unit = s.unit || state.unit;
+            state.theme = s.theme || state.theme;
+            state.sound = !!s.sound;
+            state.a11y = !!s.a11y;
+            state.autoRefresh = (s.autoRefresh ? ? true);
+            state.place = s.place || state.place;
+            state.favorites = Array.isArray(s.favorites) ? s.favorites : [];
+        }
+    } catch {}
+}
+
+function saveState() {
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+            unit: state.unit,
+            theme: state.theme,
+            sound: state.sound,
+            a11y: state.a11y,
+            autoRefresh: state.autoRefresh,
+            place: state.place,
+            favorites: state.favorites,
+        }));
+    } catch {}
+}
+
+/* ---------------------------
+   API
+---------------------------- */
+const OM_BASE = 'https://api.open-meteo.com/v1/forecast';
+const OM_GEO = 'https://geocoding-api.open-meteo.com/v1/search';
+const OM_AIR = 'https://air-quality-api.open-meteo.com/v1/air-quality';
+
+async function fetchJson(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+}
+
+async function geocode(name) {
+    const url = `${OM_GEO}?name=${encodeURIComponent(name)}&count=10&language=ru&format=json`;
+    const data = await fetchJson(url);
+    const r = data.results ? .[0];
+    if (!r) throw new Error('City not found');
+    return {
+        name: r.name,
+        country: r.country,
+        lat: r.latitude,
+        lon: r.longitude,
+        tz: r.timezone || 'auto',
+    };
+}
+
+async function reverseGeocode(lat, lon) {
+    const url = `${OM_GEO}?name=${encodeURIComponent('')}&count=1&language=ru&format=json&latitude=${lat}&longitude=${lon}`;
+    // Open-Meteo geocoding doesn't support reverse properly via this endpoint.
+    // Fallback: keep coords and generic name.
+    return { name: 'Моё место', country: '', lat, lon, tz: 'auto' };
+}
+
+async function fetchWeather(lat, lon, tz, unit) {
+    const isMetric = unit === 'metric';
+    const tempUnit = isMetric ? 'celsius' : 'fahrenheit';
+    const windUnit = isMetric ? 'ms' : 'mph';
+    const tzParam = tz && tz !== 'auto' ? tz : 'auto';
+
+    const daily = [
+        'weathercode', 'temperature_2m_max', 'temperature_2m_min',
+        'precipitation_sum', 'precipitation_probability_max',
+        'sunrise', 'sunset', 'uv_index_max',
+    ].join(',');
+
+    const hourly = [
+        'temperature_2m', 'relativehumidity_2m', 'apparent_temperature',
+        'precipitation_probability', 'dewpoint_2m',
+        'windspeed_10m', 'weathercode', 'is_day',
+    ].join(',');
+
+    const current = [
+        'temperature_2m', 'relativehumidity_2m', 'apparent_temperature',
+        'windspeed_10m', 'weathercode', 'is_day',
+    ].join(',');
+
+    const url = `${OM_BASE}?latitude=${lat}&longitude=${lon}` +
+        `&timezone=${encodeURIComponent(tzParam)}` +
+        `&temperature_unit=${tempUnit}` +
+        `&wind_speed_unit=${windUnit}` +
+        `&current=${current}&hourly=${hourly}&daily=${daily}` +
+        `&forecast_days=10`;
+
+    const data = await fetchJson(url);
+
+    const wx = {
+        current: {
+            time: data.current ? .time,
+            temperature: data.current ? .temperature_2m,
+            relativehumidity: data.current ? .relativehumidity_2m,
+            apparent_temperature: data.current ? .apparent_temperature,
+            windspeed: data.current ? .windspeed_10m,
+            weathercode: data.current ? .weathercode,
+            is_day: !!data.current ? .is_day,
+            pressure: null,
+            visibility_km: null,
+            uv_index: null,
+        },
+        hourly: [],
+        daily: [],
+    };
+
+    // hourly
+    if (data.hourly ? .time) {
+        for (let i = 0; i < data.hourly.time.length; i++) {
+            wx.hourly.push({
+                time: data.hourly.time[i],
+                temperature: data.hourly.temperature_2m ? .[i],
+                relativehumidity: data.hourly.relativehumidity_2m ? .[i],
+                apparent_temperature: data.hourly.apparent_temperature ? .[i],
+                precip_prob: data.hourly.precipitation_probability ? .[i],
+                dewpoint: data.hourly.dewpoint_2m ? .[i],
+                windspeed: data.hourly.windspeed_10m ? .[i],
+                weathercode: data.hourly.weathercode ? .[i],
+                is_day: !!data.hourly.is_day ? .[i],
+            });
+        }
+    }
+
+    // daily
+    if (data.daily ? .time) {
+        for (let i = 0; i < data.daily.time.length; i++) {
+            wx.daily.push({
+                date: data.daily.time[i],
+                weathercode: data.daily.weathercode ? .[i],
+                temp_max: data.daily.temperature_2m_max ? .[i],
+                temp_min: data.daily.temperature_2m_min ? .[i],
+                precip_sum: data.daily.precipitation_sum ? .[i],
+                precip_prob_max: data.daily.precipitation_probability_max ? .[i],
+                sunrise: data.daily.sunrise ? .[i],
+                sunset: data.daily.sunset ? .[i],
+                uv_max: data.daily.uv_index_max ? .[i],
+            });
+        }
+    }
+
+    // Patch current extras from first hour + today
+    const h0 = wx.hourly ? .[0];
+    wx.current.uv_index = Number.isFinite(wx.daily ? .[0] ? .uv_max) ? wx.daily[0].uv_max : null;
+    wx.current.pressure = null;
+    wx.current.visibility_km = null;
+
+    return wx;
+}
+
+async function fetchAirQuality(lat, lon, tz) {
+    const tzParam = tz && tz !== 'auto' ? tz : 'auto';
+    const hourly = ['us_aqi'].join(',');
+    const url = `${OM_AIR}?latitude=${lat}&longitude=${lon}&timezone=${encodeURIComponent(tzParam)}&hourly=${hourly}`;
+    const data = await fetchJson(url);
+    const aqi = data.hourly ? .us_aqi ? .[0];
+    if (!Number.isFinite(aqi)) return null;
+
+    const label =
+        aqi <= 50 ? 'Хорошее' :
+        aqi <= 100 ? 'Умеренное' :
+        aqi <= 150 ? 'Вредно для чувствительных' :
+        aqi <= 200 ? 'Вредное' :
+        aqi <= 300 ? 'Очень вредное' : 'Опасное';
+
+    return { us_aqi: aqi, label };
+}
+
+/* ---------------------------
+   Rendering
+---------------------------- */
+function setHeader(p) {
+    if (els.place) els.place.textContent = p ? `${p.name}${p.country ? ', ' + p.country : ''}` : '—';
+}
+
+function setFavoriteUI() {
+    if (!els.favoriteBtn) return;
+    const p = state.place;
+    if (!p) { els.favoriteBtn.disabled = true; return; }
+    els.favoriteBtn.disabled = false;
+    const isFav = state.favorites.some(f => samePlace(f, p));
+    els.favoriteBtn.classList.toggle('is-active', isFav);
+    els.favoriteBtn.setAttribute('aria-pressed', isFav ? 'true' : 'false');
+}
+
+function wmoToIconSafe(code, isDay) {
+    try { return wmoToIcon(code, isDay); } catch { return '•'; }
+}
+
+function renderDaily(wx) {
+    if (!els.daily) return;
+    const days = wx.daily || [];
+    const sel = state.selectedDay || days ? .[0] ? .date;
+
+    els.daily.innerHTML = days.map(d => {
+        const dateStr = new Date(d.date).toLocaleDateString('ru-RU', { weekday: 'short', day: '2-digit', month: 'short' });
+        const isActive = d.date === sel;
+        const pop = Number.isFinite(d.precip_prob_max) ? `${Math.round(d.precip_prob_max)}%` : '—';
+        const uv = Number.isFinite(d.uv_max) ? d.uv_max.toFixed(1) : '—';
+        return `
+      <button class="dcard ${isActive?'is-active':''}" data-day="${d.date}" type="button">
+        <div class="dcard__top">
+          <div class="dcard__date">${escapeHtml(dateStr)}</div>
+          <div class="dcard__icon">${wmoToIconSafe(d.weathercode, true)}</div>
+        </div>
+        <div class="dcard__temps">
+          <span class="hi">${escapeHtml(fmtTemp(d.temp_max, state.unit))}</span>
+          <span class="lo">${escapeHtml(fmtTemp(d.temp_min, state.unit))}</span>
+        </div>
+        <div class="dcard__meta muted">
+          Осадки: ${escapeHtml(pop)} • УФ: ${escapeHtml(uv)}
+        </div>
+      </button>
+    `;
+    }).join('');
+
+    // click handlers
+    $$('.dcard', els.daily).forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.selectedDay = btn.getAttribute('data-day');
+            renderDaily(wx);
+            renderHourly(wx);
+            saveState();
+        });
+    });
+}
+
+function renderHourly(wx) {
+    if (!els.hourly) return;
+    const dayISO = (state.selectedDay || wx.current.time.slice(0, 10));
+    const hours = (wx.hourly || []).filter(h => h.time.startsWith(dayISO)).slice(0, 24);
+
+    els.hourly.innerHTML = hours.map((h, idx) => {
+        const t = new Date(h.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+        const icon = wmoToIconSafe(h.weathercode, h.is_day);
+        const pop = Number.isFinite(h.precip_prob) ? `${Math.round(h.precip_prob)}%` : '—';
+        const isActive = idx === state.chart.selected;
+
+        return `
+      <button class="hcard ${isActive?'is-active':''}" type="button" data-idx="${idx}">
+        <div class="muted">${escapeHtml(t)}</div>
+        <div class="hcard__temp">${escapeHtml(fmtTemp(h.temperature, state.unit))}</div>
+        <div class="hcard__desc">${icon} <span class="muted">${escapeHtml(wmoToText(h.weathercode))}</span></div>
+        <div class="muted">Осадки: ${escapeHtml(pop)}</div>
+      </button>
+    `;
+    }).join('');
+
+    // bind
+    $$('.hcard', els.hourly).forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = Number(btn.getAttribute('data-idx'));
+            state.chart.selected = idx;
+            renderHourly(wx);
+            renderChart(wx);
+        });
+    });
+
+    state.chart.hours = hours;
+    renderChart(wx);
+}
+
+function renderChart(wx) {
+    if (!els.chart) return;
+    const hours = state.chart.hours || [];
+    if (hours.length === 0) {
+        els.chart.innerHTML = '';
+        return;
+    }
+
+    // simple svg sparkline with points (clickable)
+    const temps = hours.map(h => Number(h.temperature)).filter(Number.isFinite);
+    const min = Math.min(...temps);
+    const max = Math.max(...temps);
+    const W = 320,
+        H = 120,
+        pad = 16;
+
+    const x = i => pad + (W - pad * 2) * (i / (hours.length - 1 || 1));
+    const y = v => {
+        if (max === min) return H / 2;
+        const t = (v - min) / (max - min);
+        return (H - pad) - t * (H - pad * 2);
+    };
+
+    const pts = hours.map((h, i) => {
+        const v = Number(h.temperature);
+        return Number.isFinite(v) ? [x(i), y(v), v] : null;
+    }).filter(Boolean);
+
+    const d = pts.map((p, i) => `${i===0?'M':'L'}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join(' ');
+
+    const selected = state.chart.selected;
+
+    els.chart.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="chart-svg" role="img" aria-label="Температура по часам">
+      <path d="${d}" fill="none" stroke="currentColor" stroke-width="2" opacity="0.75"/>
+      ${pts.map((p,i)=>{
+        const isSel = i === selected;
+        return `
+          <g class="chart-pt ${isSel?'is-active':''}" data-i="${i}">
+            <circle cx="${p[0]}" cy="${p[1]}" r="${isSel?4.5:3.2}" />
+            <text x="${p[0]}" y="${p[1]-10}" font-size="10" text-anchor="middle" opacity="0.8">${Math.round(p[2])}°</text>
+          </g>
+        `;
+      }).join('')}
+    </svg>
+  `;
+
+  // tooltip + select by tap
+  const svg = $('svg', els.chart);
+  if(!svg) return;
+
+  const showTip = (i, clientX, clientY)=>{
+    const h = hours[i];
+    if(!h) return;
+    if(!els.chartTooltip) return;
+    const t = new Date(h.time).toLocaleTimeString('ru-RU',{hour:'2-digit', minute:'2-digit'});
+    els.chartTooltip.innerHTML = `
+      <div class="tt">${escapeHtml(t)}</div>
+      <div class="ttv">${escapeHtml(fmtTemp(h.temperature, state.unit))}</div>
+      <div class="muted">${escapeHtml(wmoToText(h.weathercode))}</div>
+    `;
+    els.chartTooltip.hidden = false;
+    const rect = els.chart.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    els.chartTooltip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  };
+
+  svg.addEventListener('pointermove', (e)=>{
+    const target = e.target.closest?.('.chart-pt');
+    if(!target) return;
+    const i = Number(target.getAttribute('data-i'));
+    state.chart.hover = i;
+    showTip(i, e.clientX, e.clientY);
+  });
+
+  svg.addEventListener('pointerleave', ()=>{
+    state.chart.hover = -1;
+    if(els.chartTooltip) els.chartTooltip.hidden = true;
+  });
+
+  svg.addEventListener('click', (e)=>{
+    const target = e.target.closest?.('.chart-pt');
+    if(!target) return;
+    const i = Number(target.getAttribute('data-i'));
+    state.chart.selected = i;
+    renderHourly(wx); // sync highlight on cards
+    renderChart(wx);
+  });
+}
+
+function renderTimeline(wx){
+  if(!els.timeline) return;
+  const dayISO = wx.current.time.slice(0,10);
+  const hours = wx.hourly.filter(h=>h.time.startsWith(dayISO)).slice(0,24);
+  els.timeline.innerHTML = hours.map(h=>{
+    const t = new Date(h.time).toLocaleTimeString('ru-RU',{hour:'2-digit', minute:'2-digit'});
+    const icon = wmoToIconSafe(h.weathercode, wx.current.is_day);
+    const pop = Number.isFinite(h.precip_prob) ? `${Math.round(h.precip_prob)}%` : '—';
+    return `<div class="titem">
+      <div class="muted">${escapeHtml(t)}</div>
+      <div class="titem__k">${escapeHtml(fmtTemp(h.temperature, state.unit))}</div>
+      <div class="titem__v">${icon} <span class="muted">${escapeHtml(wmoToText(h.weathercode))}</span></div>
+      <div class="muted">Осадки: ${escapeHtml(pop)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderAlerts(wx){
+  if(!els.alerts || !els.alertsList) return;
+  const dayISO = wx.current.time.slice(0,10);
+  const hours = wx.hourly.filter(h=>h.time.startsWith(dayISO)).slice(0,24);
+  const alerts = [];
+  // rain soon
+  const nextRain = hours.find(h=>Number.isFinite(h.precip_prob) && h.precip_prob >= 65);
+  if(nextRain){
+    const t = new Date(nextRain.time).toLocaleTimeString('ru-RU',{hour:'2-digit', minute:'2-digit'});
+    alerts.push({
+      icon:'☔',
+      title:'Осадки возможны',
+      desc:`Около ${t} вероятность осадков ~${Math.round(nextRain.precip_prob)}%.`,
+    });
+  }
+  // wind
+  const windThr = state.unit==='metric' ? 10 : 22;
+  const w = hours.reduce((m,h)=>Math.max(m, Number(h.windspeed||0)), 0);
+  if(w >= windThr){
+    alerts.push({ icon:'🌬️', title:'Сильный ветер', desc:`Порывы до ${fmtWind(w, state.unit)} в течение дня.` });
+  }
+  // sharp temp drop
+  const temps = hours.map(h=>h.temperature).filter(Number.isFinite);
+  if(temps.length>=8){
+    const drop = temps[0] - temps[Math.min(temps.length-1, 8)];
+    if(drop >= (state.unit==='metric'?6:10)){
+      alerts.push({ icon:'📉', title:'Похолодание', desc:'Температура заметно снизится в ближайшие часы.' });
+    }
+  }
+  els.alerts.hidden = alerts.length === 0;
+  els.alertsList.innerHTML = alerts.map(a=>
+    `<div class="alert"><div class="alert__i">${a.icon}</div><div><div class="alert__t">${escapeHtml(a.title)}</div><div class="alert__d">${escapeHtml(a.desc)}</div></div></div>`
+  ).join('');
+}
+
+function maybeEasterEgg(wx){
+  const c = wx.current;
+  const t = Number(c.temperature);
+  if([95,96,99].includes(c.weathercode)){
+    toast('⚡ Гроза рядом. Держись подальше от воды и открытых мест.');
+  }
+  if(Number.isFinite(t) && t <= (state.unit==='metric'?-10:14)){
+    toast('☃️ Холодно! Утепляйся 🧣');
+  }
+}
+
+// Very subtle ambient soundscapes (no external assets)
+const Sound = (()=>{
+  let ctx=null, master=null, noise=null, filter=null, gain=null, thunderTimer=null;
+
+  function start(){
+    if(ctx) return;
+    ctx = new (window.AudioContext||window.webkitAudioContext)();
+    master = ctx.createGain();
+    master.gain.value = 0.045;
+    master.connect(ctx.destination);
+    filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1200;
+    gain = ctx.createGain();
+    gain.gain.value = 0;
+    filter.connect(gain); gain.connect(master);
+
+    // white noise buffer
+    const buf = ctx.createBuffer(1, ctx.sampleRate*2, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<data.length;i++) data[i] = (Math.random()*2-1);
+    noise = ctx.createBufferSource();
+    noise.buffer = buf;
+    noise.loop = true;
+    noise.connect(filter);
+    noise.start();
+  }
+
+  function stop(){
+    try{
+      thunderTimer && clearInterval(thunderTimer);
+      thunderTimer = null;
+      noise?.stop?.();
+      ctx?.close?.();
+    }catch{}
+    ctx=null; master=null; noise=null; filter=null; gain=null;
+  }
+
+  function setWeather(theme, wmo){
+    if(!ctx) start();
+    // adjust texture
+    const isRain = ['rain','storm'].includes(theme);
+    const isSnow = theme === 'snow';
+    const isFog = theme === 'fog';
+
+    if(!gain || !filter) return;
+    const targetGain = isRain ? 0.30 : isSnow ? 0.18 : isFog ? 0.12 : 0.0;
+    gain.gain.setTargetAtTime(targetGain, ctx.currentTime, 0.25);
+    const targetFreq = isRain ? 900 : isSnow ? 1500 : isFog ? 700 : 1200;
+    filter.frequency.setTargetAtTime(targetFreq, ctx.currentTime, 0.25);
+
+    // thunder
+    if([95,96,99].includes(wmo)){
+      if(!thunderTimer){
+        thunderTimer = setInterval(()=>{
+          if(!ctx) return;
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = 'sine';
+          o.frequency.value = 60 + Math.random()*30;
+          g.gain.value = 0;
+          o.connect(g); g.connect(master);
+          const t0 = ctx.currentTime;
+          g.gain.linearRampToValueAtTime(0.25, t0+0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0+0.8);
+          o.start(t0); o.stop(t0+0.85);
+        }, 5200 + Math.random()*3200);
+      }
+    }else{
+      thunderTimer && clearInterval(thunderTimer);
+      thunderTimer = null;
+    }
+  }
+
+  return {
+    start,
+    stop,
+    setWeather,
+  };
+})();
+
+/* ---------------------------
+   Favorites
+---------------------------- */
+function samePlace(a,b){
+  return Math.abs(a.lat-b.lat) < 1e-6 && Math.abs(a.lon-b.lon) < 1e-6;
+}
+
+async function fetchMini(lat, lon, tz, unit){
+  const wx = await fetchWeather(lat, lon, tz, unit);
+  return {
+    temp: wx.current.temperature,
+    weathercode: wx.current.weathercode,
+    is_day: wx.current.is_day,
+    wind: wx.current.windspeed,
+  };
+}
+
+async function renderFavorites(withTemps=false){
+  const favs = state.favorites;
+  if(!els.favorites || !els.favHint) return;
+
+  els.favorites.innerHTML = '';
+  els.favHint.hidden = favs.length > 0;
+
+  if(favs.length === 0) return;
+
+  let temps = null;
+  if(withTemps){
+    temps = await Promise.allSettled(favs.slice(0,10).map(f=>fetchMini(f.lat,f.lon,f.tz,state.unit)));
+  }
+
+  favs.forEach((f, i)=>{
+    const row = document.createElement('div');
+    row.className = 'fav';
+    row.tabIndex = 0;
+    row.role = 'button';
+    row.setAttribute('aria-label', `Открыть ${f.name}`);
+
+    const left = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'fav__name';
+    name.textContent = f.name;
+    const meta = document.createElement('div');
+    meta.className = 'fav__meta';
+    meta.textContent = f.country || '—';
+    left.append(name, meta);
+
+    const right = document.createElement('div');
+    right.className = 'fav__temp';
+
+    if(withTemps && temps && temps[i] && temps[i].status === 'fulfilled'){
+      right.textContent = fmtTemp(temps[i].value.temp, state.unit);
+    }else{
+      right.textContent = '—';
+    }
+
+    row.append(left, right);
+
+    const open = async ()=>{
+      state.place = { ...f };
+      await refresh();
+    };
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' ') open(); });
+
+    els.favorites.appendChild(row);
+  });
+}
+
+/* ---------------------------
+   Dashboard (optional)
+---------------------------- */
+async function renderDashboard(){
+  if(!els.dashboard) return;
+  const favs = state.favorites;
+  // show skeleton cards
+  const top = favs.slice(0, 12);
+  els.dashboard.innerHTML = top.map(()=>
+    `<div class="dashcard">
+      <div class="dashcard__head">
+        <div>
+          <div class="dashcard__name muted">…</div>
+          <div class="dashcard__meta muted">…</div>
+        </div>
+        <div class="dashcard__temp muted">—</div>
+      </div>
+      <div class="dashcard__foot">
+        <span class="pill muted">…</span>
+        <span class="pill muted">…</span>
+      </div>
+    </div>`
+  ).join('');
+
+  const minis = await Promise.allSettled(top.map(f=>fetchMini(f.lat,f.lon,f.tz,state.unit)));
+  els.dashboard.innerHTML = '';
+  top.forEach((f, i)=>{
+    const card = document.createElement('div');
+    card.className = 'dashcard';
+    const mini = minis[i]?.status === 'fulfilled' ? minis[i].value : null;
+    const text = mini ? wmoToText(mini.weathercode) : '—';
+    const icon = mini ? wmoToIconSafe(mini.weathercode, mini.is_day) : '';
+    card.innerHTML = `
+      <div class="dashcard__head">
+        <div>
+          <div class="dashcard__name">${escapeHtml(f.name)}</div>
+          <div class="dashcard__meta">${escapeHtml(f.country||'—')}</div>
+        </div>
+        <div class="dashcard__temp">${escapeHtml(mini ? fmtTemp(mini.temp, state.unit) : '—')}</div>
+      </div>
+      <div class="dashcard__foot">
+        <span class="pill">${icon} ${escapeHtml(text)}</span>
+        <span class="pill">Ветер: ${escapeHtml(mini ? fmtWind(mini.wind, state.unit) : '—')}</span>
+      </div>
+    `;
+    const open = async ()=>{
+      state.place = { ...f };
+      setView('forecast');
+      await refresh();
+    };
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' ') open(); });
+    els.dashboard.appendChild(card);
+  });
+}
+
+/* ---------------------------
+   Modals
+---------------------------- */
+function openModal(title, html){
+  if(!els.modal) return;
+  els.modalTitle.textContent = title;
+  els.modalBody.innerHTML = html;
+  els.modal.hidden = false;
+  els.modal.setAttribute('aria-hidden','false');
+}
+function closeModal(){
+  if(!els.modal) return;
+  if(els.modal.hidden) return;
+  els.modal.hidden = true;
+  els.modal.setAttribute('aria-hidden','true');
+  if(els.modalBody) els.modalBody.innerHTML = '';
+}
+
+function explainWeather(c, h0){
+  // Lightweight heuristic explanation
+  const w = wmoToText(c.weathercode);
+  const pop = Number.isFinite(h0?.precip_prob) ? Math.round(h0.precip_prob) : null;
+  const windy = c.windspeed >= (state.unit==='metric'?8:18);
+  const humid = c.relativehumidity >= 75;
+  let title = w;
+  let text = 'Это оценка на основе текущих условий и ближайших часов.';
+  if(pop!=null && pop>=60){ title = 'Высокий шанс осадков'; text = `Вероятность осадков в ближайший час около ${pop}%.`; }
+  if([45,48].includes(c.weathercode) || (humid && !pop)){ title = 'Влажно и возможен туман'; text = 'Высокая влажность часто даёт дымку/туман, особенно утром и ночью.'; }
+  if(windy && (pop==null || pop<40)){ title = 'Ветрено'; text = 'Сильный ветер делает погоду более “холодной” и повышает ощущаемую разницу.'; }
+  return { title, text };
+}
+
+function openExplainModal(wx){
+  const c = wx.current;
+  const h0 = wx.hourly?.find(h=>h.time.startsWith(c.time.slice(0,13))) || wx.hourly?.[0];
+  const pop = Number.isFinite(h0?.precip_prob) ? Math.round(h0.precip_prob) : null;
+  const w = wmoToText(c.weathercode);
+  const parts = [];
+  parts.push(`<div class="pill">Состояние: <b>${escapeHtml(w)}</b></div>`);
+  parts.push(`<div class="pill">Ощущается: <b>${escapeHtml(fmtTemp(c.apparent_temperature, state.unit))}</b></div>`);
+  parts.push(`<div class="pill">Ветер: <b>${escapeHtml(fmtWind(c.windspeed, state.unit))}</b></div>`);
+  parts.push(`<div class="pill">Влажность: <b>${Math.round(c.relativehumidity)}%</b></div>`);
+  if(pop!=null) parts.push(`<div class="pill">Вероятность осадков (час): <b>${pop}%</b></div>`);
+
+  const expl = explainWeather(c, h0);
+
+  openModal('Почему такой прогноз', `
+    <div class="modal-grid">
+      <div class="modal-col">
+        <div class="muted">Коротко</div>
+        <div style="font-weight:900;font-size:16px;letter-spacing:-.2px">${escapeHtml(expl.title)}</div>
+        <div class="muted">${escapeHtml(expl.text)}</div>
+      </div>
+      <div class="modal-col">
+        <div class="muted">Факторы</div>
+        <div class="pill-row">${parts.join('')}</div>
+      </div>
+    </div>
+  `);
+}
+
+function renderCompare(a, b){
+  const row = (k, va, vb)=>`
+    <div class="compare__item">
+      <div class="muted">${escapeHtml(k)}</div>
+      <div class="compare__vals"><b>${escapeHtml(va)}</b><span class="muted">vs</span><b>${escapeHtml(vb)}</b></div>
+    </div>`;
+  return `
+    <div class="compare__grid">
+      ${row('Макс/мин', `${fmtTemp(a.temp_max, state.unit)} / ${fmtTemp(a.temp_min, state.unit)}`, `${fmtTemp(b.temp_max, state.unit)} / ${fmtTemp(b.temp_min, state.unit)}`)}
+      ${row('Осадки', `${Math.round(a.precip_sum)} мм`, `${Math.round(b.precip_sum)} мм`)}
+      ${row('Вероятность осадков', `${Math.round(a.precip_prob_max)}%`, `${Math.round(b.precip_prob_max)}%`)}
+      ${row('УФ-индекс', `${Number.isFinite(a.uv_max)?a.uv_max.toFixed(1):'—'}`, `${Number.isFinite(b.uv_max)?b.uv_max.toFixed(1):'—'}`)}
+    </div>
+  `;
+}
+
+function openCompareModal(wx){
+  const opts = wx.daily.map(d=>`<option value="${d.date}">${new Date(d.date).toLocaleDateString('ru-RU',{weekday:'short', day:'2-digit', month:'short'})}</option>`).join('');
+  openModal('Сравнение дней', `
+    <div class="compare">
+      <div class="compare__row">
+        <label class="muted">День 1</label>
+        <select class="select" id="cmpA">${opts}</select>
+      </div>
+      <div class="compare__row">
+        <label class="muted">День 2</label>
+        <select class="select" id="cmpB">${opts}</select>
+      </div>
+      <button class="btn btn--primary" id="cmpGo" type="button">Сравнить</button>
+      <div id="cmpOut"></div>
+    </div>
+  `);
+  const a = document.getElementById('cmpA');
+  const b = document.getElementById('cmpB');
+  const go = document.getElementById('cmpGo');
+  const out = document.getElementById('cmpOut');
+  if(a && b) b.selectedIndex = Math.min(1, b.options.length-1);
+  go?.addEventListener('click', ()=>{
+    const da = wx.daily.find(d=>d.date===a.value);
+    const db = wx.daily.find(d=>d.date===b.value);
+    if(!da || !db) return;
+    out.innerHTML = renderCompare(da, db);
+  });
+  // default render
+  setTimeout(()=>go?.click(), 0);
+}
+
+/* ---------------------------
+   Gestures + day switching
+---------------------------- */
+function setupGestures(){
+  const area = els.viewForecast;
+  if(!area) return;
+  let sx=0, sy=0, st=0;
+  const onStart = (e)=>{
+    const t = e.touches?.[0];
+    if(!t) return;
+    sx = t.clientX; sy = t.clientY; st = Date.now();
+  };
+  const onEnd = (e)=>{
+    const t = e.changedTouches?.[0];
+    if(!t) return;
+    const dx = t.clientX - sx;
+    const dy = t.clientY - sy;
+    const dt = Date.now() - st;
+    if(dt > 650) return;
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    if(ax < 40 && ay < 40) return;
+    // horizontal -> days
+    if(ax > ay){
+      if(dx < 0) selectAdjacentDay(1);
+      else selectAdjacentDay(-1);
+    }else{
+      // vertical -> focus details
+      if(dy < 0) area.classList.add('details');
+      else area.classList.remove('details');
+    }
+  };
+  area.addEventListener('touchstart', onStart, {passive:true});
+  area.addEventListener('touchend', onEnd, {passive:true});
+}
+
+function selectAdjacentDay(delta){
+  const wx = state.wx;
+  if(!wx?.daily?.length) return;
+  const idx = wx.daily.findIndex(d=>d.date===state.selectedDay);
+  const next = clamp(idx + delta, 0, wx.daily.length-1);
+  state.selectedDay = wx.daily[next].date;
+  renderDaily(wx);
+  renderHourly(wx);
+}
+
+/* ---------------------------
+   Geolocation + search
+---------------------------- */
+async function geoLocate(){
+  if(!navigator.geolocation){
+    toast('Геолокация не поддерживается');
+    return searchCity('Amsterdam');
+  }
+  toast('Определяем местоположение…');
+  const pos = await new Promise((resolve, reject)=>{
+    navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy:true, timeout: 10000 });
+  });
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const place = await reverseGeocode(lat, lon);
+  state.place = place;
+  await refresh();
+}
+
+async function searchCity(query){
+  toast('Ищем город…');
+  const place = await geocode(query);
+  state.place = place;
+  await refresh();
+}
+
+/* ---------------------------
+   Main refresh
+---------------------------- */
+async function renderCurrent(wx, aq){
+  const c = wx.current;
+  // Dynamic background theme
+  const theme = weatherTheme(c.weathercode, c.is_day);
+  els.app.setAttribute('data-weather', theme);
+  setSmoothBackground(theme);
+  setSmoothFX(c.weathercode, c.is_day);
+
+  // Confidence
+  if(els.confidence){
+    const conf = computeConfidence(wx);
+    els.confidence.textContent = `Надёжность: ${conf}%`;
+  }
+
+  if(els.temp) els.temp.textContent = fmtTemp(c.temperature, state.unit);
+  if(els.summary) els.summary.innerHTML = `${wmoToIconSafe(c.weathercode, c.is_day)}<span>${escapeHtml(wmoToText(c.weathercode))}</span>`;
+  if(els.feels) els.feels.textContent = fmtTemp(c.apparent_temperature, state.unit);
+  if(els.wind) els.wind.textContent = fmtWind(c.windspeed, state.unit);
+  if(els.humidity) els.humidity.textContent = `${Math.round(c.relativehumidity)}%`;
+
+  if(els.pressure) els.pressure.textContent = fmtPressure(c.pressure);
+  if(els.uv) els.uv.textContent = (Number.isFinite(c.uv_index) ? c.uv_index.toFixed(1) : '—');
+  if(els.visibility) els.visibility.textContent = fmtKm(c.visibility_km);
+
+  // Details (next hour + today)
+  const h0 = wx.hourly?.[0];
+  const prob = Number.isFinite(h0?.precip_prob) ? `${Math.round(h0.precip_prob)}%` : '—';
+  if(els.precipChance) els.precipChance.textContent = prob;
+  if(els.dewPoint) els.dewPoint.textContent = fmtTemp(h0?.dewpoint, state.unit);
+  if(els.sunrise) els.sunrise.textContent = fmtClock(wx.daily?.[0]?.sunrise);
+  if(els.sunset) els.sunset.textContent = fmtClock(wx.daily?.[0]?.sunset);
+
+  const nowLocal = new Date(c.time);
+  const ts = nowLocal.toLocaleString('ru-RU', { weekday:'long', day:'2-digit', month:'long', hour:'2-digit', minute:'2-digit' });
+
+  const aqText = aq?.us_aqi ? ` • AQI ${aq.us_aqi} (${aq.label})` : '';
+  if(els.placeMeta) els.placeMeta.textContent = `${ts}${aqText}`;
+
+  if(aq?.us_aqi && aq.us_aqi >= 101){
+    showNotice(`Качество воздуха: ${aq.label} (AQI ${aq.us_aqi}). Ограничь длительные нагрузки на улице.`);
+  }else{
+    if(els.notice) els.notice.hidden = true;
+  }
+
+  renderTimeline(wx);
+  renderAlerts(wx);
+  renderWidgetPreview();
+  if(state.sound) Sound.setWeather(theme, c.weathercode);
+
+  maybeEasterEgg(wx);
+}
+
+function computeConfidence(wx){
+  try{
+    const dayISO = wx.current.time.slice(0,10);
+    const hrs = wx.hourly.filter(h=>h.time.startsWith(dayISO)).slice(0,12);
+    const pops = hrs.map(h=>Number.isFinite(h.precip_prob)?h.precip_prob:0);
+    const winds = hrs.map(h=>Number.isFinite(h.windspeed)?h.windspeed:0);
+    const avgPop = pops.reduce((a,b)=>a+b,0)/(pops.length||1);
+    const maxWind = Math.max(...winds, 0);
+    const popPenalty = avgPop * 0.55;
+    const windPenalty = maxWind * (state.unit==='metric'?2.2:1.3);
+    const base = 92;
+    return clamp(Math.round(base - popPenalty - windPenalty), 35, 98);
+  }catch{
+    return 70;
+  }
+}
+
+async function refresh(){
+  const p = state.place;
+  if(!p) return;
+
+  setHeader(p);
+  setFavoriteUI();
+
+  setLoading(true);
+  // Weather + AQ parallel (AQ optional)
+  try{
+    const [wx, aq] = await Promise.all([
+      fetchWeather(p.lat, p.lon, p.tz, state.unit),
+      fetchAirQuality(p.lat, p.lon, p.tz).catch(()=>null),
+    ]);
+
+    state.wx = wx;
+    const todayISO = wx.current.time.slice(0,10);
+    if(!state.selectedDay) state.selectedDay = todayISO;
+    // if selected day is out of range, reset
+    const hasDay = wx.daily && wx.daily.some(d=>d.date===state.selectedDay);
+    if(!hasDay) state.selectedDay = todayISO;
+
+    await renderCurrent(wx, aq);
+    renderDaily(wx);
+    renderHourly(wx);
+    await renderFavorites(true);
+    await renderDashboard();
+
+    saveState();
+  }catch(err){
+    console.error(err);
+    toast('Не удалось обновить данные. Проверь интернет.');
+  }finally{
+    setLoading(false);
+  }
+}
+
+/* ---------------------------
+   Views
+---------------------------- */
+function setView(name){
+  document.body.setAttribute('data-view', name);
+  els.tabs?.forEach(t=>{
+    const v = t.getAttribute('data-view');
+    t.classList.toggle('is-active', v === name);
+    t.setAttribute('aria-selected', v === name ? 'true' : 'false');
+  });
+}
+
+/* ---------------------------
+   Widget preview (copy/paste)
+---------------------------- */
+function renderWidgetPreview(){
+  if(!els.widgetPreview || !state.wx || !state.place) return;
+  const c = state.wx.current;
+  const p = state.place;
+  const text = `${p.name}: ${fmtTemp(c.temperature, state.unit)} • ${wmoToText(c.weathercode)} • Ветер ${fmtWind(c.windspeed, state.unit)}`;
+  els.widgetPreview.textContent = text;
+}
+
+/* ---------------------------
+   UI bindings
+---------------------------- */
+function applyUnit(){
+  document.documentElement.setAttribute('data-unit', state.unit);
+  if(state.place) refresh();
+}
+
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme', state.theme);
+  // background will be re-applied on refresh
+  if(state.place) refresh();
+}
+
+function applyA11y(){
+  document.documentElement.classList.toggle('a11y', state.a11y);
+}
+
+function toggleFavorite(){
+  const p = state.place;
+  if(!p) return;
+  const idx = state.favorites.findIndex(f=>samePlace(f,p));
+  if(idx >= 0){
+    state.favorites.splice(idx, 1);
+    toast('Удалено из избранного');
+  }else{
+    state.favorites.unshift({ ...p });
+    toast('Добавлено в избранное');
+  }
+  saveState();
+  setFavoriteUI();
+  renderFavorites(true);
+  renderDashboard();
+}
+
+function bindEvents(){
+  // tabs
+  els.tabs?.forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      setView(btn.getAttribute('data-view'));
+    });
+  });
+
+  // unit
+  els.unitBtn?.addEventListener('click', ()=>{
+    state.unit = state.unit === 'metric' ? 'imperial' : 'metric';
+    saveState();
+    applyUnit();
+  });
+
+  // theme
+  els.themeBtn?.addEventListener('click', ()=>{
+    state.theme = state.theme === 'auto' ? 'dark' : state.theme === 'dark' ? 'light' : 'auto';
+    saveState();
+    applyTheme();
+  });
+
+  // sound
+  els.soundBtn?.addEventListener('click', async ()=>{
+    state.sound = !state.sound;
+    saveState();
+    els.soundBtn.classList.toggle('is-active', state.sound);
+    if(!state.sound) Sound.stop();
+    else{
+      try{
+        Sound.start();
+        if(state.wx) Sound.setWeather(weatherTheme(state.wx.current.weathercode, state.wx.current.is_day), state.wx.current.weathercode);
+      }catch{}
+    }
+  });
+
+  // a11y
+  els.a11yBtn?.addEventListener('click', ()=>{
+    state.a11y = !state.a11y;
+    saveState();
+    applyA11y();
+  });
+
+  // refresh
+  els.refreshBtn?.addEventListener('click', refresh);
+
+  // notice close
+  els.noticeClose?.addEventListener('click', hideNotice);
+
+  // favorites
+  els.favoriteBtn?.addEventListener('click', toggleFavorite);
+
+  // modal
+  els.modalClose?.addEventListener('click', closeModal);
+  els.modal?.addEventListener('click', (e)=>{
+    if(e.target === els.modal) closeModal();
+  });
+  document.addEventListener('keydown', (e)=>{
+    if(e.key === 'Escape') closeModal();
+  });
+
+  // explain click: if you have a button with id "explainBtn"
+  const explainBtn = document.getElementById('explainBtn');
+  explainBtn?.addEventListener('click', ()=> state.wx && openExplainModal(state.wx));
+
+  // compare click: if you have a button with id "compareBtn"
+  const compareBtn = document.getElementById('compareBtn');
+  compareBtn?.addEventListener('click', ()=> state.wx && openCompareModal(state.wx));
+
+  // search
+  const doSuggest = debounce(async ()=>{
+    const q = els.search?.value?.trim();
+    if(!q){
+      state.suggestions = [];
+      state.sugIndex = -1;
+      if(els.suggestions) els.suggestions.innerHTML = '';
+      return;
+    }
+    try{
+      const url = `${OM_GEO}?name=${encodeURIComponent(q)}&count=10&language=ru&format=json`;
+      const data = await fetchJson(url);
+      state.suggestions = (data.results || []).map(r=>({
+        name: r.name,
+        country: r.country,
+        lat: r.latitude,
+        lon: r.longitude,
+        tz: r.timezone || 'auto',
+      }));
+      state.sugIndex = -1;
+      renderSuggestions();
+    }catch{
+      state.suggestions = [];
+      renderSuggestions();
+    }
+  }, 250);
+
+  els.search?.addEventListener('input', doSuggest);
+
+  els.searchClear?.addEventListener('click', ()=>{
+    if(!els.search) return;
+    els.search.value = '';
+    els.search.focus();
+    state.suggestions = [];
+    renderSuggestions();
+  });
+
+  els.search?.addEventListener('keydown', (e)=>{
+    if(state.suggestions.length === 0) return;
+    if(e.key === 'ArrowDown'){
+      e.preventDefault();
+      state.sugIndex = clamp(state.sugIndex + 1, 0, state.suggestions.length-1);
+      renderSuggestions();
+    }else if(e.key === 'ArrowUp'){
+      e.preventDefault();
+      state.sugIndex = clamp(state.sugIndex - 1, -1, state.suggestions.length-1);
+      renderSuggestions();
+    }else if(e.key === 'Enter'){
+      e.preventDefault();
+      const pick = state.sugIndex >= 0 ? state.suggestions[state.sugIndex] : state.suggestions[0];
+      if(pick){
+        state.place = pick;
+        state.suggestions = [];
+        renderSuggestions();
+        refresh();
+      }
+    }
+  });
+}
+
+function renderSuggestions(){
+  if(!els.suggestions) return;
+  const list = state.suggestions;
+  els.suggestions.innerHTML = list.map((s, i)=>{
+    const active = i === state.sugIndex;
+    return `
+      <div class="sug ${active?'is-active':''}" role="button" tabindex="0" data-i="${i}">
+        <div class="sug__name">${escapeHtml(s.name)}</div>
+        <div class="sug__meta muted">${escapeHtml(s.country||'')}</div>
+      </div>
+    `;
+  }).join('');
+
+  $$('.sug', els.suggestions).forEach(el=>{
+    const i = Number(el.getAttribute('data-i'));
+    const pick = ()=>{
+      state.place = list[i];
+      state.suggestions = [];
+      renderSuggestions();
+      refresh();
+    };
+    el.addEventListener('click', pick);
+    el.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' ') pick(); });
+  });
+}
+
+/* ---------------------------
+   Boot
+---------------------------- */
+function init(){
+  loadState();
+  applyUnit();
+  applyTheme();
+  applyA11y();
+  els.soundBtn?.classList.toggle('is-active', state.sound);
+
+  bindEvents();
+  setupGestures();
+
+  if(!state.place){
+    // initial: try geo, fallback
+    geoLocate().catch(()=>searchCity('Amsterdam'));
+  }else{
+    refresh();
+  }
+
+  // auto refresh
+  setInterval(()=>{
+    if(state.autoRefresh && state.place) refresh();
+  }, 10 * 60 * 1000);
+}
+
+init();
