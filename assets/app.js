@@ -13,8 +13,6 @@ import {
   themeGradient,
 } from './ui.js';
 
-// WeatherVision — main app logic (matches index.html in this repo)
-
 /* ---------------------------
    Storage (shared with widget.js)
 ---------------------------- */
@@ -161,7 +159,7 @@ const els = {
   refreshToggle: document.getElementById('refreshToggle'),
   widgetPreview: document.getElementById('widgetPreview'),
 
-  // offline
+  // offline (legacy overlay in HTML)
   offlineScreen: document.getElementById('offlineScreen'),
   offlineText: document.getElementById('offlineText'),
   offlineTry: document.getElementById('offlineTry'),
@@ -348,17 +346,15 @@ async function fetchAir(place) {
 }
 
 /* ---------------------------
-   Rendering helpers
+   Views + UI helpers
 ---------------------------- */
 function setView(name) {
-  // tabs
   els.tabs.forEach((t) => {
     const isActive = t.getAttribute('data-view') === name;
     t.classList.toggle('is-active', isActive);
     t.setAttribute('aria-pressed', isActive ? 'true' : 'false');
   });
 
-  // views
   if (els.viewForecast) els.viewForecast.hidden = name !== 'forecast';
   if (els.viewCities) els.viewCities.hidden = name !== 'cities';
   if (els.viewSettings) els.viewSettings.hidden = name !== 'settings';
@@ -390,11 +386,6 @@ function setToggle(btn, on) {
   btn.classList.toggle('is-on', on);
 }
 
-function placeTitleText(p) {
-  if (!p) return '—';
-  return `${p.name}${p.country ? ', ' + p.country : ''}`;
-}
-
 function computeConfidence(wx) {
   try {
     const dayISO = wx.current.time.slice(0, 10);
@@ -419,40 +410,33 @@ function renderCurrent() {
   const wx = state.wx;
   if (!p || !wx) return;
 
-  // titles
   if (els.placeKicker) els.placeKicker.textContent = p.country || '—';
   if (els.placeTitle) els.placeTitle.textContent = p.name || '—';
 
-  // meta
   const now = wx.current?.time ? new Date(wx.current.time) : new Date();
   const meta = now.toLocaleString('ru-RU', { weekday: 'long', day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' });
   const aq = state.aqi?.us_aqi ? ` • AQI ${state.aqi.us_aqi} (${state.aqi.label})` : '';
   if (els.placeMeta) els.placeMeta.textContent = meta + aq;
 
-  // background
   const theme = weatherTheme(wx.current.weathercode, wx.current.is_day);
   els.app.setAttribute('data-weather', theme);
   setSmoothBackground(theme);
   setSmoothFX(wx.current.weathercode);
 
-  // top
   if (els.temp) els.temp.textContent = fmtTemp(wx.current.temperature, state.unit);
   if (els.summary) {
     els.summary.innerHTML = `${wmoToIcon(wx.current.weathercode, wx.current.is_day)} <span>${escapeHtml(wmoToText(wx.current.weathercode))}</span>`;
   }
   if (els.confidence) els.confidence.textContent = `Надёжность: ${computeConfidence(wx)}%`;
 
-  // chips
   if (els.feels) els.feels.textContent = fmtTemp(wx.current.apparent_temperature, state.unit);
   if (els.wind) els.wind.textContent = fmtWind(wx.current.windspeed, state.unit);
   if (els.humidity) els.humidity.textContent = Number.isFinite(wx.current.relativehumidity) ? `${Math.round(wx.current.relativehumidity)}%` : '—';
 
-  // cards
   if (els.pressure) els.pressure.textContent = fmtPressure(wx.current.pressure);
   if (els.uv) els.uv.textContent = Number.isFinite(wx.current.uv_index) ? wx.current.uv_index.toFixed(1) : '—';
   if (els.visibility) els.visibility.textContent = fmtKm(wx.current.visibility_km);
 
-  // extra details: take first hour of selected day
   const dayISO = (state.selectedDay || wx.current.time.slice(0, 10));
   const h0 = wx.hourly.find((h) => h.time.startsWith(dayISO)) || wx.hourly[0];
   if (els.precipChance) els.precipChance.textContent = Number.isFinite(h0?.precip_prob) ? `${Math.round(h0.precip_prob)}%` : '—';
@@ -462,7 +446,6 @@ function renderCurrent() {
   if (els.sunrise) els.sunrise.textContent = fmtClock(d0?.sunrise);
   if (els.sunset) els.sunset.textContent = fmtClock(d0?.sunset);
 
-  // notice (air quality)
   if (els.notice && els.noticeText) {
     if (state.aqi?.us_aqi >= 101) {
       els.notice.hidden = false;
@@ -578,7 +561,7 @@ function renderHourly() {
 
   if (els.hourlyMeta && hours.length) {
     const dayISO = hours[0].time.slice(0, 10);
-    els.hourlyMeta.textContent = new Date(dayISO).toLocaleDateString('ru-RU', { weekday: 'long', day: '2-digit', month: 'long' });
+    els.hourlyMeta.textContent = new Date(dayISO).toLocaleDateString('ru-RU', { weekday: 'long', day: '2-digit', month: '2-digit' });
   }
 
   els.hourly.innerHTML = hours.map((h, idx) => {
@@ -597,7 +580,6 @@ function renderHourly() {
     btn.addEventListener('click', () => {
       state.chartSelected = Number(btn.getAttribute('data-idx'));
       drawHourChart();
-      // keep card highlight
       $$('.hcard', els.hourly).forEach((b) => b.classList.remove('is-active'));
       btn.classList.add('is-active');
     });
@@ -636,17 +618,18 @@ function drawHourChart() {
     ctx.moveTo(pad, yy);
     ctx.lineTo(w - pad, yy);
   }
-  ctx.strokeStyle = 'currentColor';
+  ctx.strokeStyle = getComputedStyle(document.documentElement).color;
   ctx.stroke();
   ctx.globalAlpha = 1;
 
   // line
   ctx.beginPath();
+  let moved = false;
   hours.forEach((p, i) => {
     const v = Number(p.temperature);
     if (!Number.isFinite(v)) return;
     const xx = x(i), yy = y(v);
-    if (i === 0) ctx.moveTo(xx, yy);
+    if (!moved) { ctx.moveTo(xx, yy); moved = true; }
     else ctx.lineTo(xx, yy);
   });
   ctx.lineWidth = 2;
@@ -668,7 +651,6 @@ function drawHourChart() {
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    // labels (tiny)
     ctx.font = '10px Inter, system-ui, -apple-system, Segoe UI, Arial';
     ctx.textAlign = 'center';
     ctx.globalAlpha = 0.6;
@@ -676,11 +658,11 @@ function drawHourChart() {
     ctx.globalAlpha = 1;
   });
 
-  // pointer interaction (tap on hourChart -> select)
+  // pointer interaction
   if (!canvas._bound) {
     canvas._bound = true;
 
-    const locate = (clientX, clientY) => {
+    const locate = (clientX) => {
       const rect = canvas.getBoundingClientRect();
       const cx = clientX - rect.left;
       const idx = clamp(Math.round(((cx - pad) / (w - pad * 2)) * (hours.length - 1)), 0, hours.length - 1);
@@ -690,6 +672,7 @@ function drawHourChart() {
     const showTooltip = (idx, clientX, clientY) => {
       if (!tip) return;
       const h1 = hours[idx];
+      if (!h1) return;
       const t = new Date(h1.time).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
       tip.innerHTML = `<div class="tt">${escapeHtml(t)}</div>
         <div class="ttv">${escapeHtml(fmtTemp(h1.temperature, state.unit))}</div>
@@ -702,16 +685,15 @@ function drawHourChart() {
     };
 
     canvas.addEventListener('pointermove', (e) => {
-      const idx = locate(e.clientX, e.clientY);
+      const idx = locate(e.clientX);
       showTooltip(idx, e.clientX, e.clientY);
     });
     canvas.addEventListener('pointerleave', () => {
       if (tip) tip.hidden = true;
     });
     canvas.addEventListener('click', (e) => {
-      const idx = locate(e.clientX, e.clientY);
+      const idx = locate(e.clientX);
       state.chartSelected = idx;
-      // highlight corresponding card
       const card = els.hourly?.querySelector(`.hcard[data-idx="${idx}"]`);
       if (card) card.click();
       drawHourChart();
@@ -725,10 +707,7 @@ function drawHourChart() {
 function samePlace(a, b) {
   return Math.abs(a.lat - b.lat) < 1e-6 && Math.abs(a.lon - b.lon) < 1e-6;
 }
-
-function isFavorite(p) {
-  return state.favorites.some((f) => samePlace(f, p));
-}
+function isFavorite(p) { return state.favorites.some((f) => samePlace(f, p)); }
 
 function renderFavButton() {
   if (!els.favBtn || !els.favIcon) return;
@@ -771,7 +750,6 @@ async function renderDashboard() {
     return;
   }
 
-  // skeleton
   els.dashboard.innerHTML = favs.map(() => `
     <div class="dashcard">
       <div class="dashcard__head">
@@ -858,7 +836,6 @@ function openModal(title, html) {
   els.modal.hidden = false;
   els.modal.setAttribute('aria-hidden', 'false');
 }
-
 function closeModal() {
   if (!els.modal) return;
   els.modal.hidden = true;
@@ -904,7 +881,6 @@ const Sound = (() => {
     filter.connect(gain);
     gain.connect(master);
 
-    // white noise buffer
     const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const data = buf.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
@@ -965,19 +941,56 @@ const Sound = (() => {
 })();
 
 /* ---------------------------
-   Offline handling
+   Offline banner (NON-blocking)
 ---------------------------- */
-function setOfflineUI(isOffline) {
-  if (!els.offlineScreen) return;
-  els.offlineScreen.hidden = !isOffline;
+let offlineBanner = null;
+
+function ensureOfflineBanner() {
+  if (offlineBanner) return offlineBanner;
+
+  offlineBanner = document.createElement('div');
+  offlineBanner.id = 'offlineBanner';
+  offlineBanner.style.position = 'fixed';
+  offlineBanner.style.left = '12px';
+  offlineBanner.style.right = '12px';
+  offlineBanner.style.bottom = '12px';
+  offlineBanner.style.zIndex = '9999';
+  offlineBanner.style.display = 'none';
+
+  // минимальная разметка (стили у тебя уже есть, но даже без них будет ок)
+  offlineBanner.innerHTML = `
+    <div style="backdrop-filter:saturate(1.2) blur(10px); border-radius:16px; padding:12px 12px; border:1px solid rgba(255,255,255,.12); background:rgba(20,20,20,.55); color:inherit;">
+      <div style="font-weight:800; margin-bottom:6px;">Вы оффлайн</div>
+      <div id="offlineBannerText" style="opacity:.85; font-size:13px; line-height:1.3; margin-bottom:10px;">Показываю последний сохранённый прогноз.</div>
+      <button id="offlineBannerTry" type="button" style="border:none; border-radius:12px; padding:10px 12px; font-weight:800; cursor:pointer;">
+        Попробовать обновить
+      </button>
+    </div>
+  `;
+
+  document.body.appendChild(offlineBanner);
+
+  const tryBtn = offlineBanner.querySelector('#offlineBannerTry');
+  tryBtn?.addEventListener('click', () => refresh());
+
+  return offlineBanner;
+}
+
+function setOfflineUI(isOffline, text) {
+  // ВАЖНО: скрываем старый fullscreen overlay, чтобы он не блокировал клики
+  if (els.offlineScreen) els.offlineScreen.hidden = true;
+
+  const b = ensureOfflineBanner();
+  const t = b.querySelector('#offlineBannerText');
+
+  if (typeof text === 'string' && t) t.textContent = text;
+  b.style.display = isOffline ? 'block' : 'none';
 }
 
 function loadLastForecast() {
   const saved = readJSON(LS.lastForecast, null);
-  if (!saved) return null;
-  return saved;
+  return saved || null;
 }
-
 function saveLastForecast(payload) {
   writeJSON(LS.lastForecast, payload);
 }
@@ -1001,14 +1014,13 @@ function renderAll() {
   renderFavoritesList();
   renderWidgetPreview();
   updateMap();
-  // sound
   if (state.wx) Sound.setWeather(weatherTheme(state.wx.current.weathercode, state.wx.current.is_day), state.wx.current.weathercode);
 }
 
 async function refresh() {
   if (!state.place) return;
 
-  // online?
+  // если реально оффлайн — показываем saved forecast
   if (!navigator.onLine) {
     const saved = loadLastForecast();
     if (saved && saved.place && saved.wx) {
@@ -1017,23 +1029,24 @@ async function refresh() {
       state.aqi = saved.aqi || null;
       state.selectedDay = state.selectedDay || (state.wx.current?.time?.slice(0, 10) ?? null);
       toast('Офлайн: показываю сохранённый прогноз');
-      setOfflineUI(true);
-      renderAll();
+      setOfflineUI(true, 'Показываю последний сохранённый прогноз.');
+      try { renderAll(); } catch (e) { console.error('Render error (offline):', e); }
     } else {
-      setOfflineUI(true);
+      setOfflineUI(true, 'Нет сохранённого прогноза.');
       toast('Офлайн и нет сохранённого прогноза');
     }
     return;
   }
 
+  // онлайн — баннер выключаем заранее
   setOfflineUI(false);
 
   try {
     const [wx, aqi] = await Promise.all([
       fetchWeather(state.place),
       fetchAir(state.place).catch(() => null),
-      setOfflineUI(false);
     ]);
+
     state.wx = wx;
     state.aqi = aqi;
 
@@ -1046,10 +1059,22 @@ async function refresh() {
     savePrefs();
     saveLastForecast({ place: state.place, wx: state.wx, aqi: state.aqi, savedAt: Date.now(), unit: state.unit });
 
-    renderAll();
+    // на успешной загрузке — точно выключаем баннер
+    setOfflineUI(false);
+
+    // рендер отдельно, чтобы любая ошибка рендера не включала “оффлайн”
+    try {
+      renderAll();
+    } catch (e) {
+      console.error('Render error (online):', e);
+      toast('Данные пришли, но ошибка отображения — смотри Console');
+    }
   } catch (e) {
     console.error(e);
-    toast('Не удалось обновить данные. Проверь интернет.');
+
+    // ВАЖНО: если онлайн, но API не ответило — НЕ показываем “Вы оффлайн” (иначе блок путаница)
+    setOfflineUI(false);
+    toast('Не удалось обновить данные. Проверь интернет/блокировщик.');
   }
 }
 
@@ -1122,7 +1147,6 @@ async function geoLocate() {
   const lat = pos.coords.latitude;
   const lon = pos.coords.longitude;
 
-  // We keep a generic title (Open-Meteo reverse geocode isn't in this endpoint)
   state.place = { name: 'Моё место', country: '', lat, lon, tz: 'auto' };
   state.selectedDay = null;
   savePrefs();
@@ -1137,11 +1161,7 @@ function bindEvents() {
   els.tabs.forEach((t) => t.addEventListener('click', () => {
     const v = t.getAttribute('data-view');
     setView(v);
-    if (v === 'forecast') {
-      // map might be visible lower; keep lazy
-    } else if (v === 'cities') {
-      renderDashboard();
-    }
+    if (v === 'cities') renderDashboard();
   }));
 
   // settings button (shortcut)
@@ -1155,7 +1175,6 @@ function bindEvents() {
     savePrefs();
     updateUnitUI();
     await refresh();
-    // widget shares unit key
     localStorage.setItem(LS.unit, state.unit);
   }));
   updateUnitUI();
@@ -1335,20 +1354,22 @@ function bindEvents() {
 
   // modal close
   els.modal?.addEventListener('click', (e) => {
-    const close = e.target?.getAttribute?.('data-close') === '1' || e.target?.closest?.('[data-close=\"1\"]');
+    const close = e.target?.getAttribute?.('data-close') === '1' || e.target?.closest?.('[data-close="1"]');
     if (close) closeModal();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-  // offline try
+  // legacy offlineTry (если есть в HTML — пусть тоже работает)
   els.offlineTry?.addEventListener('click', () => refresh());
 
-  // online/offline events
-  window.addEventListener('online', () => { setOfflineUI(false); refresh(); });
-  window.addEventListener('offline', () => { 
-  if (!navigator.onLine) setOfflineUI(true);
+  // online/offline events (с защитой от ложных offline)
+  window.addEventListener('online', () => {
+    setOfflineUI(false);
+    refresh();
   });
-
+  window.addEventListener('offline', () => {
+    if (!navigator.onLine) setOfflineUI(true, 'Соединение потеряно. Можно открыть сохранённый прогноз.');
+  });
 
   // lazy map init when scrolled into view
   const obs = new IntersectionObserver((entries) => {
@@ -1379,7 +1400,6 @@ async function boot() {
     state.place = { name: 'Amsterdam', country: 'NL', lat: 52.3676, lon: 4.9041, tz: 'auto' };
   }
 
-  // render favorites sections early
   renderFavoritesList();
   renderDashboard();
   renderFavButton();
@@ -1387,12 +1407,10 @@ async function boot() {
 
   await refresh();
 
-  // auto refresh
   setInterval(() => {
     if (state.autoRefresh && document.visibilityState === 'visible') refresh();
   }, 30 * 60 * 1000);
 
-  // refresh on focus
   document.addEventListener('visibilitychange', () => {
     if (state.autoRefresh && document.visibilityState === 'visible') refresh();
   });
